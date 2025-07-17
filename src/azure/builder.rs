@@ -667,10 +667,12 @@ impl MicrosoftAzureBuilder {
                 }
             }
             "http" if use_emulator => {
-                self.account_name = parsed
-                    .path_segments()
-                    .and_then(|mut segments| segments.next())
-                    .map(ToString::to_string);
+                self.account_name = self.account_name.clone().or_else(|| {
+                    parsed
+                        .path_segments()
+                        .and_then(|mut segments| segments.next())
+                        .map(ToString::to_string)
+                });
                 self.endpoint = Some({
                     let mut endpoint = parsed.clone();
                     endpoint.set_path(""); // remove path
