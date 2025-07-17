@@ -52,18 +52,17 @@ enum Error {
         url: String,
     },
 
-    #[error(
-        "Unable parse emulator url {}={}, Error: {}",
-        env_name,
-        env_value,
-        source
-    )]
-    UnableToParseEmulatorUrl {
-        env_name: String,
-        env_value: String,
-        source: url::ParseError,
-    },
-
+    // #[error(
+    //     "Unable parse emulator url {}={}, Error: {}",
+    //     env_name,
+    //     env_value,
+    //     source
+    // )]
+    // UnableToParseEmulatorUrl {
+    //     env_name: String,
+    //     env_value: String,
+    //     source: url::ParseError,
+    // },
     #[error("Account must be specified")]
     MissingAccount {},
 
@@ -806,6 +805,9 @@ impl MicrosoftAzureBuilder {
                 }
                 _ => return Err(Error::UrlNotRecognised { url: url.into() }.into()),
             },
+            "http" => {
+                // TODO: most likely local emulator
+            }
             scheme => {
                 let scheme = scheme.into();
                 return Err(Error::UnknownUrlScheme { scheme }.into());
@@ -1243,9 +1245,36 @@ impl MicrosoftAzureBuilder {
             let account_name = self
                 .account_name
                 .unwrap_or_else(|| EMULATOR_ACCOUNT.to_string());
+
+            let account_url = match self.endpoint {
+                Some(account_url) => account_url,
+                None => {
+                    // url_from_env("AZURITE_BLOB_STORAGE_URL", "http://127.0.0.1:10000")?,
+                    std::env::var("AZURITE_BLOB_STORAGE_URL")
+                        .ok()
+                        .unwrap_or_else(|| "http://127.0.0.1:10000".to_string())
+                }
+            };
+
+            //     Ok(env_value) => {
+            //         Url::parse(&env_value).map_err(|source| Error::UnableToParseEmulatorUrl {
+            //             env_name: env_name.into(),
+            //             env_value,
+            //             source,
+            //         })?
+            //     }
+            //     Err(_) => Url::parse(default_url).expect("Failed to parse default URL"),
+            // }
+
+            let url = Url::parse(&account_url).map_err(|source| {
+                let url = account_url.clone();
+                Error::UnableToParseUrl { url, source }
+            })?;
+
             // Allow overriding defaults. Values taken from
             // from https://docs.rs/azure_storage/0.2.0/src/azure_storage/core/clients/storage_account_client.rs.html#129-141
-            let url = url_from_env("AZURITE_BLOB_STORAGE_URL", "http://127.0.0.1:10000")?;
+            // let url = url_from_env("AZURITE_BLOB_STORAGE_URL", "http://127.0.0.1:10000")?;
+            //
             let credential = if let Some(k) = self.access_key {
                 AzureCredential::AccessKey(AzureAccessKey::try_new(&k)?)
             } else if let Some(bearer_token) = self.bearer_token {
@@ -1333,21 +1362,21 @@ impl MicrosoftAzureBuilder {
     }
 }
 
-/// Parses the contents of the environment variable `env_name` as a URL
-/// if present, otherwise falls back to default_url
-fn url_from_env(env_name: &str, default_url: &str) -> Result<Url> {
-    let url = match std::env::var(env_name) {
-        Ok(env_value) => {
-            Url::parse(&env_value).map_err(|source| Error::UnableToParseEmulatorUrl {
-                env_name: env_name.into(),
-                env_value,
-                source,
-            })?
-        }
-        Err(_) => Url::parse(default_url).expect("Failed to parse default URL"),
-    };
-    Ok(url)
-}
+// /// Parses the contents of the environment variable `env_name` as a URL
+// /// if present, otherwise falls back to default_url
+// fn url_from_env(env_name: &str, default_url: &str) -> Result<Url> {
+//     let url = match std::env::var(env_name) {
+//         Ok(env_value) => {
+//             Url::parse(&env_value).map_err(|source| Error::UnableToParseEmulatorUrl {
+//                 env_name: env_name.into(),
+//                 env_value,
+//                 source,
+//             })?
+//         }
+//         Err(_) => Url::parse(default_url).expect("Failed to parse default URL"),
+//     };
+//     Ok(url)
+// }
 
 /// Parse a SAS token string into the query pairs expected by [`AzureCredential::SASToken`].
 pub fn split_sas(sas: &str) -> Result<Vec<(String, String)>> {
