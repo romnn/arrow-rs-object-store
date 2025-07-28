@@ -562,7 +562,7 @@ fn canonicalize_header(headers: &HeaderMap) -> String {
         .filter_map(|(k, _)| {
             headers
                 .get(k)
-                .and_then(|value| value.to_str())
+                .and_then(|value| value.to_str().ok())
                 .map(|value| (k.as_str(), value))
         })
         .collect::<Vec<_>>();
