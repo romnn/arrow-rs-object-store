@@ -508,8 +508,12 @@ fn canonicalize_header(headers: &HeaderMap) -> String {
     let mut names = headers
         .iter()
         .filter(|&(k, _)| k.as_str().starts_with("x-ms"))
-        // TODO remove unwraps
-        .map(|(k, _)| (k.as_str(), headers.get(k).unwrap().to_str().unwrap()))
+        .filter_map(|(k, _)| {
+            headers
+                .get(k)
+                .and_then(|value| value.to_str())
+                .map(|value| (k.as_str(), value))
+        })
         .collect::<Vec<_>>();
     names.sort_unstable();
 
