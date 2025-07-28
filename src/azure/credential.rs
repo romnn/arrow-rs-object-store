@@ -560,6 +560,7 @@ fn canonicalize_header(headers: &HeaderMap) -> String {
         .iter()
         .filter(|&(k, _)| k.as_str().starts_with("x-ms"))
         .filter_map(|(k, _)| {
+            tracing::warn!(%k, ?headers, "getting header key");
             headers
                 .get(k)
                 .and_then(|value| value.to_str().ok())
