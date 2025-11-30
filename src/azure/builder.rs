@@ -52,17 +52,6 @@ enum Error {
         url: String,
     },
 
-    // #[error(
-    //     "Unable parse emulator url {}={}, Error: {}",
-    //     env_name,
-    //     env_value,
-    //     source
-    // )]
-    // UnableToParseEmulatorUrl {
-    //     env_name: String,
-    //     env_value: String,
-    //     source: url::ParseError,
-    // },
     #[error("Account must be specified")]
     MissingAccount {},
 
@@ -715,6 +704,9 @@ impl MicrosoftAzureBuilder {
             false => Ok(s.to_string()),
         };
 
+        let use_emulator = self.use_emulator.get().ok().unwrap_or(false);
+        let allow_http = self.client_options.allow_http();
+
         match parsed.scheme() {
             "adl" | "azure" => self.container_name = Some(validate(host)?),
             "az" | "abfs" | "abfss" => {
@@ -754,7 +746,23 @@ impl MicrosoftAzureBuilder {
                     }
                 }
             }
-            "https" => match host.split_once('.') {
+            "http" if use_emulator => {
+                self.account_name = parsed
+                    .path_segments()
+                    .and_then(|mut segments| segments.next())
+                    .map(ToString::to_string);
+                self.endpoint = Some({
+                    let mut endpoint = parsed.clone();
+                    endpoint.set_path(""); // remove path
+                    endpoint.to_string()
+                });
+            }
+            scheme @ "http" if !allow_http => {
+                // TODO: better error here
+                let scheme = scheme.into();
+                return Err(Error::UnknownUrlScheme { scheme }.into());
+            }
+            "https" | "http" => match host.split_once('.') {
                 // Workspace-level Private Link detection
                 // "{workspaceid}.z??.(onelake|dfs|blob).fabric.microsoft.com"
                 Some((workspaceid, rest))
@@ -805,14 +813,12 @@ impl MicrosoftAzureBuilder {
                 }
                 _ => return Err(Error::UrlNotRecognised { url: url.into() }.into()),
             },
-            "http" => {
-                // TODO: most likely local emulator
-            }
             scheme => {
                 let scheme = scheme.into();
                 return Err(Error::UnknownUrlScheme { scheme }.into());
             }
         }
+
         Ok(())
     }
 
@@ -1248,33 +1254,16 @@ impl MicrosoftAzureBuilder {
 
             let account_url = match self.endpoint {
                 Some(account_url) => account_url,
-                None => {
-                    // url_from_env("AZURITE_BLOB_STORAGE_URL", "http://127.0.0.1:10000")?,
-                    std::env::var("AZURITE_BLOB_STORAGE_URL")
-                        .ok()
-                        .unwrap_or_else(|| "http://127.0.0.1:10000".to_string())
-                }
+                None => std::env::var("AZURITE_BLOB_STORAGE_URL")
+                    .ok()
+                    .unwrap_or_else(|| "http://127.0.0.1:10000".to_string()),
             };
-
-            //     Ok(env_value) => {
-            //         Url::parse(&env_value).map_err(|source| Error::UnableToParseEmulatorUrl {
-            //             env_name: env_name.into(),
-            //             env_value,
-            //             source,
-            //         })?
-            //     }
-            //     Err(_) => Url::parse(default_url).expect("Failed to parse default URL"),
-            // }
 
             let url = Url::parse(&account_url).map_err(|source| {
                 let url = account_url.clone();
                 Error::UnableToParseUrl { url, source }
             })?;
 
-            // Allow overriding defaults. Values taken from
-            // from https://docs.rs/azure_storage/0.2.0/src/azure_storage/core/clients/storage_account_client.rs.html#129-141
-            // let url = url_from_env("AZURITE_BLOB_STORAGE_URL", "http://127.0.0.1:10000")?;
-            //
             let credential = if let Some(k) = self.access_key {
                 AzureCredential::AccessKey(AzureAccessKey::try_new(&k)?)
             } else if let Some(bearer_token) = self.bearer_token {
@@ -1362,22 +1351,6 @@ impl MicrosoftAzureBuilder {
     }
 }
 
-// /// Parses the contents of the environment variable `env_name` as a URL
-// /// if present, otherwise falls back to default_url
-// fn url_from_env(env_name: &str, default_url: &str) -> Result<Url> {
-//     let url = match std::env::var(env_name) {
-//         Ok(env_value) => {
-//             Url::parse(&env_value).map_err(|source| Error::UnableToParseEmulatorUrl {
-//                 env_name: env_name.into(),
-//                 env_value,
-//                 source,
-//             })?
-//         }
-//         Err(_) => Url::parse(default_url).expect("Failed to parse default URL"),
-//     };
-//     Ok(url)
-// }
-
 /// Parse a SAS token string into the query pairs expected by [`AzureCredential::SASToken`].
 pub fn split_sas(sas: &str) -> Result<Vec<(String, String)>> {
     let sas = percent_decode_str(sas)
@@ -1404,6 +1377,110 @@ mod tests {
     use base64::Engine;
     use base64::prelude::BASE64_STANDARD;
     use std::collections::HashMap;
+
+    #[test]
+    fn azure_blob_build_emulator_from_url() {
+        let container_name = "testcontainer";
+        let endpoint = "http://127.0.0.1:5000";
+        let endpoint_with_account = format!("{endpoint}/{}", super::EMULATOR_ACCOUNT);
+
+        let builder = MicrosoftAzureBuilder::new()
+            .with_use_emulator(true)
+            .with_container_name(container_name)
+            .with_url(endpoint_with_account);
+
+        let client = builder.build().unwrap().client;
+        let config = client.config();
+
+        assert_eq!(
+            config.service.host(),
+            Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(config.service.port(), Some(5000));
+        assert_eq!(config.account, super::EMULATOR_ACCOUNT);
+        assert_eq!(config.container, container_name);
+    }
+
+    #[test]
+    fn azure_blob_build_emulator_from_endpoint() {
+        let container_name = "testcontainer";
+        let endpoint = "http://127.0.0.1:5000";
+
+        let builder = MicrosoftAzureBuilder::new()
+            .with_use_emulator(true)
+            .with_account(super::EMULATOR_ACCOUNT)
+            .with_access_key(super::EMULATOR_ACCOUNT_KEY)
+            .with_container_name(container_name)
+            .with_endpoint(endpoint.to_string());
+
+        let client = builder.build().unwrap().client;
+        let config = client.config();
+
+        assert_eq!(
+            config.service.host(),
+            Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(config.service.port(), Some(5000));
+        assert_eq!(config.account, super::EMULATOR_ACCOUNT);
+        assert_eq!(config.container, container_name);
+    }
+
+    #[tokio::test]
+    async fn azure_blob_build_emulator_default() {
+        let container_name = "testcontainer";
+
+        let builder = MicrosoftAzureBuilder::new()
+            .with_use_emulator(true)
+            .with_container_name(container_name);
+
+        let client = builder.build().unwrap().client;
+        let config = client.config();
+
+        assert_eq!(
+            config.service.host(),
+            Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(config.service.port(), Some(10000));
+        assert_eq!(config.account, super::EMULATOR_ACCOUNT);
+        assert_eq!(config.container, container_name);
+        assert_eq!(
+            config.credentials.get_credential().await.unwrap().as_ref(),
+            &AzureCredential::AccessKey(
+                AzureAccessKey::try_new(super::EMULATOR_ACCOUNT_KEY).unwrap()
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn azure_blob_build_emulator_manual() {
+        let container_name = "testcontainer";
+        let endpoint = "http://127.0.0.1:5000";
+
+        let builder = MicrosoftAzureBuilder::new()
+            .with_use_emulator(false)
+            .with_account(super::EMULATOR_ACCOUNT)
+            .with_access_key(super::EMULATOR_ACCOUNT_KEY)
+            .with_container_name(container_name)
+            .with_allow_http(true)
+            .with_endpoint(endpoint.to_string());
+
+        let client = builder.build().unwrap().client;
+        let config = client.config();
+
+        assert_eq!(
+            config.service.host(),
+            Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(config.service.port(), Some(5000));
+        assert_eq!(config.account, super::EMULATOR_ACCOUNT);
+        assert_eq!(config.container, container_name);
+        assert_eq!(
+            config.credentials.get_credential().await.unwrap().as_ref(),
+            &AzureCredential::AccessKey(
+                AzureAccessKey::try_new(super::EMULATOR_ACCOUNT_KEY).unwrap()
+            ),
+        );
+    }
 
     #[test]
     fn azure_blob_test_urls() {

@@ -503,6 +503,10 @@ impl ClientOptions {
         }
     }
 
+    pub fn allow_http(&self) -> bool {
+        self.allow_http.get().ok().unwrap_or(false)
+    }
+
     /// Sets the [`User-Agent`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/User-Agent) header to be used by this client
     ///
     /// Default is based on the version of this crate
