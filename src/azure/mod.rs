@@ -28,7 +28,7 @@ use crate::{
     UploadPart,
     multipart::{MultipartStore, PartId},
     path::Path,
-    signer::Signer,
+    signer::{SignedUrlOptions, Signer},
 };
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt, TryStreamExt};
@@ -198,9 +198,20 @@ impl Signer for MicrosoftAzure {
     /// # }
     /// ```
     async fn signed_url(&self, method: Method, path: &Path, expires_in: Duration) -> Result<Url> {
+        self.signed_url_with_options(method, path, expires_in, SignedUrlOptions::default())
+            .await
+    }
+
+    async fn signed_url_with_options(
+        &self,
+        method: Method,
+        path: &Path,
+        expires_in: Duration,
+        options: SignedUrlOptions,
+    ) -> Result<Url> {
         let mut url = self.path_url(path);
         let signer = self.client.signer(expires_in).await?;
-        signer.sign(&method, &mut url)?;
+        signer.sign_with_options(&method, &mut url, &options)?;
         Ok(url)
     }
 

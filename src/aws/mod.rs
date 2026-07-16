@@ -41,7 +41,7 @@ use crate::client::CredentialProvider;
 use crate::client::get::GetClientExt;
 use crate::client::list::{ListClient, ListClientExt};
 use crate::multipart::{MultipartStore, PartId};
-use crate::signer::Signer;
+use crate::signer::{SignedUrlOptions, Signer};
 use crate::util::STRICT_ENCODE_SET;
 use crate::{
     CopyMode, CopyOptions, Error, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload,
@@ -138,15 +138,45 @@ impl Signer for AmazonS3 {
     /// # }
     /// ```
     async fn signed_url(&self, method: Method, path: &Path, expires_in: Duration) -> Result<Url> {
+        self.signed_url_with_options(method, path, expires_in, SignedUrlOptions::default())
+            .await
+    }
+
+    async fn signed_url_with_options(
+        &self,
+        method: Method,
+        path: &Path,
+        expires_in: Duration,
+        options: SignedUrlOptions,
+    ) -> Result<Url> {
         let credential = self.credentials().get_credential().await?;
         let authorizer = AwsAuthorizer::new(&credential, "s3", &self.client.config.region)
             .with_request_payer(self.client.config.request_payer);
 
         let path_url = self.path_url(path);
-        let mut url = path_url.parse().map_err(|e| Error::Generic {
+        let mut url: Url = path_url.parse().map_err(|e| Error::Generic {
             store: STORE,
             source: format!("Unable to parse url {path_url}: {e}").into(),
         })?;
+
+        // Response-header overrides are query parameters of the canonical
+        // request, so they must be present before signing.
+        // https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html#API_GetObject_RequestSyntax
+        //
+        // Percent-encode the value by hand: form-encoding via
+        // `query_pairs_mut` serializes spaces as `+`, which S3-compatible
+        // servers may decode literally and then fail signature verification.
+        // `%20` is unambiguous under both form and RFC 3986 decoding, matching
+        // the canonical-request encoding and what AWS SDKs emit.
+        if let Some(disposition) = &options.response_content_disposition {
+            let encoded = percent_encoding::utf8_percent_encode(disposition, &STRICT_ENCODE_SET);
+            let pair = format!("response-content-disposition={encoded}");
+            let query = match url.query() {
+                Some(existing) if !existing.is_empty() => format!("{existing}&{pair}"),
+                _ => pair,
+            };
+            url.set_query(Some(&query));
+        }
 
         authorizer.sign(method, &mut url, expires_in);
 
