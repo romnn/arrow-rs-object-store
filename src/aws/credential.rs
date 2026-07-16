@@ -1161,6 +1161,64 @@ mod tests {
     }
 
     #[test]
+    fn signed_get_url_with_response_content_disposition() {
+        let credential = AwsCredential {
+            key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            token: None,
+        };
+
+        let date = DateTime::parse_from_rfc3339("2013-05-24T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let authorizer = AwsAuthorizer {
+            date: Some(date),
+            crypto: None,
+            credential: &credential,
+            service: "s3",
+            region: "us-east-1",
+            token_header: None,
+            sign_payload: false,
+            request_payer: false,
+        };
+
+        let mut plain_url = Url::parse("https://examplebucket.s3.amazonaws.com/test.txt").unwrap();
+        authorizer
+            .sign(Method::GET, &mut plain_url, Duration::from_secs(86400))
+            .unwrap();
+
+        // A response-header override appended before signing becomes part of
+        // the canonical request, exactly as `signed_url_with_options` does it.
+        let disposition = "attachment; filename=\"live name.pdf\"";
+        let mut url = Url::parse("https://examplebucket.s3.amazonaws.com/test.txt").unwrap();
+        let encoded = utf8_percent_encode(disposition, &crate::util::STRICT_ENCODE_SET);
+        url.set_query(Some(&format!("response-content-disposition={encoded}")));
+        authorizer
+            .sign(Method::GET, &mut url, Duration::from_secs(86400))
+            .unwrap();
+
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs
+                .get("response-content-disposition")
+                .map(String::as_str),
+            Some(disposition)
+        );
+        // Spaces must serialize as `%20`, never as form-style `+`, so the
+        // server-side canonical request matches the signed one.
+        assert!(url.query().unwrap().contains(
+            "response-content-disposition=attachment%3B%20filename%3D%22live%20name.pdf%22"
+        ));
+        let plain_pairs: std::collections::HashMap<_, _> =
+            plain_url.query_pairs().into_owned().collect();
+        assert_ne!(
+            pairs.get("X-Amz-Signature"),
+            plain_pairs.get("X-Amz-Signature")
+        );
+    }
+
+    #[test]
     fn signed_get_url_request_payer() {
         // Values from https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
         let credential = AwsCredential {

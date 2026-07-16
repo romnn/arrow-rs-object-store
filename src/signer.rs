@@ -23,6 +23,25 @@ use http::Method;
 use std::{fmt, time::Duration};
 use url::Url;
 
+/// Options customizing a signed URL beyond method, path, and lifetime.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SignedUrlOptions {
+    /// Override for the `Content-Disposition` header served with the response.
+    ///
+    /// The override is part of the signature (`response-content-disposition`
+    /// for AWS SigV4, `rscd` for Azure SAS), so holders of the URL cannot
+    /// alter it.
+    pub response_content_disposition: Option<String>,
+}
+
+impl SignedUrlOptions {
+    /// Returns true when these options request no customization.
+    pub fn is_default(&self) -> bool {
+        self.response_content_disposition.is_none()
+    }
+}
+
 /// Universal API to generate presigned URLs from multiple object store services.
 #[async_trait]
 pub trait Signer: Send + Sync + fmt::Debug + 'static {
@@ -31,6 +50,28 @@ pub trait Signer: Send + Sync + fmt::Debug + 'static {
     /// implementation's credentials such that the URL can be handed to something that doesn't have
     /// access to the object store's credentials, to allow limited access to the object store.
     async fn signed_url(&self, method: Method, path: &Path, expires_in: Duration) -> Result<Url>;
+
+    /// [`Signer::signed_url`] with additional [`SignedUrlOptions`].
+    ///
+    /// The default implementation only supports default options and returns
+    /// [`Error::NotImplemented`](crate::Error::NotImplemented) otherwise, so a
+    /// store without support never silently drops a requested override.
+    async fn signed_url_with_options(
+        &self,
+        method: Method,
+        path: &Path,
+        expires_in: Duration,
+        options: SignedUrlOptions,
+    ) -> Result<Url> {
+        if options.is_default() {
+            self.signed_url(method, path, expires_in).await
+        } else {
+            Err(crate::Error::NotImplemented {
+                operation: "signed_url_with_options".to_string(),
+                implementer: std::any::type_name::<Self>().to_string(),
+            })
+        }
+    }
 
     /// Generate signed urls for multiple paths.
     ///

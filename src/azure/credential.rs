@@ -25,6 +25,7 @@ use crate::client::{
     CredentialProvider, CryptoProvider, DigestAlgorithm, HttpClient, HttpError, HttpRequest,
     TokenProvider, crypto_provider,
 };
+use crate::signer::SignedUrlOptions;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD};
@@ -195,6 +196,17 @@ impl AzureSigner {
         method: &Method,
         url: &mut Url,
     ) -> crate::Result<()> {
+        self.sign_with_options(crypto, method, url, &SignedUrlOptions::default())
+    }
+
+    pub(crate) fn sign_with_options(
+        &self,
+        crypto: &dyn CryptoProvider,
+        method: &Method,
+        url: &mut Url,
+        options: &SignedUrlOptions,
+    ) -> crate::Result<()> {
+        let response_content_disposition = options.response_content_disposition.as_deref();
         let (str_to_sign, query_pairs) = match &self.delegation_key {
             Some(delegation_key) => string_to_sign_user_delegation_sas(
                 url,
@@ -203,8 +215,16 @@ impl AzureSigner {
                 &self.start,
                 &self.end,
                 delegation_key,
+                response_content_disposition,
             ),
-            None => string_to_sign_service_sas(url, method, &self.account, &self.start, &self.end),
+            None => string_to_sign_service_sas(
+                url,
+                method,
+                &self.account,
+                &self.start,
+                &self.end,
+                response_content_disposition,
+            ),
         };
         let mut ctx = crypto.hmac(DigestAlgorithm::Sha256, &self.signing_key.0)?;
         ctx.update(str_to_sign.as_bytes());
@@ -431,6 +451,7 @@ fn string_to_sign_service_sas(
     account: &str,
     start: &DateTime<Utc>,
     end: &DateTime<Utc>,
+    response_content_disposition: Option<&str>,
 ) -> (String, HashMap<&'static str, String>) {
     let (signed_resource, signed_permissions, signed_start, signed_expiry, canonicalized_resource) =
         string_to_sign_sas(u, method, account, start, end);
@@ -441,18 +462,18 @@ fn string_to_sign_service_sas(
         signed_start,
         signed_expiry,
         canonicalized_resource,
-        "",                              // signed identifier
-        "",                              // signed ip
-        "",                              // signed protocol
-        AZURE_VERSION.to_str().unwrap(), // signed version
-        signed_resource,                 // signed resource
-        "",                              // signed snapshot time
-        "",                              // signed encryption scope
-        "",                              // rscc - response header: Cache-Control
-        "",                              // rscd - response header: Content-Disposition
-        "",                              // rsce - response header: Content-Encoding
-        "",                              // rscl - response header: Content-Language
-        "",                              // rsct - response header: Content-Type
+        "",                                               // signed identifier
+        "",                                               // signed ip
+        "",                                               // signed protocol
+        AZURE_VERSION.to_str().unwrap(),                  // signed version
+        signed_resource,                                  // signed resource
+        "",                                               // signed snapshot time
+        "",                                               // signed encryption scope
+        "",                                               // rscc - response header: Cache-Control
+        response_content_disposition.unwrap_or_default(), // rscd - response header: Content-Disposition
+        "", // rsce - response header: Content-Encoding
+        "", // rscl - response header: Content-Language
+        "", // rsct - response header: Content-Type
     );
 
     let mut pairs = HashMap::new();
@@ -461,6 +482,9 @@ fn string_to_sign_service_sas(
     pairs.insert("st", signed_start);
     pairs.insert("se", signed_expiry);
     pairs.insert("sr", signed_resource);
+    if let Some(disposition) = response_content_disposition {
+        pairs.insert("rscd", disposition.to_string());
+    }
 
     (string_to_sign, pairs)
 }
@@ -475,6 +499,7 @@ fn string_to_sign_user_delegation_sas(
     start: &DateTime<Utc>,
     end: &DateTime<Utc>,
     delegation_key: &UserDelegationKey,
+    response_content_disposition: Option<&str>,
 ) -> (String, HashMap<&'static str, String>) {
     let (signed_resource, signed_permissions, signed_start, signed_expiry, canonicalized_resource) =
         string_to_sign_sas(u, method, account, start, end);
@@ -501,10 +526,10 @@ fn string_to_sign_user_delegation_sas(
         "",                              // signed snapshot time
         "",                              // signed encryption scope
         "",                              // rscc - response header: Cache-Control
-        "",                              // rscd - response header: Content-Disposition
-        "",                              // rsce - response header: Content-Encoding
-        "",                              // rscl - response header: Content-Language
-        "",                              // rsct - response header: Content-Type
+        response_content_disposition.unwrap_or_default(), // rscd - response header: Content-Disposition
+        "", // rsce - response header: Content-Encoding
+        "", // rscl - response header: Content-Language
+        "", // rsct - response header: Content-Type
     );
 
     let mut pairs = HashMap::new();
@@ -519,6 +544,9 @@ fn string_to_sign_user_delegation_sas(
     pairs.insert("ske", delegation_key.signed_expiry.clone());
     pairs.insert("sks", delegation_key.signed_service.clone());
     pairs.insert("skv", delegation_key.signed_version.clone());
+    if let Some(disposition) = response_content_disposition {
+        pairs.insert("rscd", disposition.to_string());
+    }
 
     (string_to_sign, pairs)
 }
@@ -1398,5 +1426,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(request.headers().get(&VERSION).unwrap(), "2026-02-06");
+    }
+
+    #[test]
+    fn signed_url_response_content_disposition_is_part_of_the_sas() {
+        let crypto = crypto_provider(None).unwrap();
+        let key = AzureAccessKey::try_new(&BASE64_STANDARD.encode(b"test-signing-key")).unwrap();
+        let start = DateTime::parse_from_rfc3339("2013-05-24T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = start + chrono::Duration::hours(1);
+        let signer = AzureSigner::new(key, "account".to_string(), start, end, None);
+
+        let mut plain_url =
+            Url::parse("https://account.blob.core.windows.net/container/file.txt").unwrap();
+        signer.sign(crypto, &Method::GET, &mut plain_url).unwrap();
+
+        let disposition = "attachment; filename=\"live name.pdf\"";
+        let options = SignedUrlOptions {
+            response_content_disposition: Some(disposition.to_string()),
+        };
+        let mut url =
+            Url::parse("https://account.blob.core.windows.net/container/file.txt").unwrap();
+        signer
+            .sign_with_options(crypto, &Method::GET, &mut url, &options)
+            .unwrap();
+
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("rscd").map(String::as_str), Some(disposition));
+
+        // The override participates in the string-to-sign, so the signature
+        // must differ from a URL signed without it.
+        let plain_pairs: std::collections::HashMap<_, _> =
+            plain_url.query_pairs().into_owned().collect();
+        assert!(plain_pairs.get("rscd").is_none());
+        assert_ne!(pairs.get("sig"), plain_pairs.get("sig"));
     }
 }
